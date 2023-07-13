@@ -1,0 +1,24 @@
+#!/bin/bash
+region=$1
+city_name=$2
+city_id=$3
+
+url="http://download.geofabrik.de/russia/$region-fed-district-latest.osm.pbf"
+local_prefix="data/external"
+local_path=$local_prefix/$region-fed-district-latest.osm.pbf
+city_boundary=$local_prefix/$city_name-boundary.osm
+osm_city_data=$local_prefix/$city_name.osm.pbf
+city_pois=$4
+# скачиваем файл карт
+wget $url -P $local_prefix -nc
+# извлекаем данные для заданного города 
+echo "Обработка данных OSM..."
+osmium getid -r -t $local_path $city_id -o $city_boundary
+osmium extract -p $city_boundary $local_path -o $osm_city_data
+# отбираем необходимые объекты
+osmium tags-filter $osm_city_data \
+    amenity \
+    building=train_station,office,industrial,university,retail \
+    shop=mall,supermarket,convenience \
+    highway=bus_stop railway=tram_stop aeroway=terminal \
+    -o $city_pois
