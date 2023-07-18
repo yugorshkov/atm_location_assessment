@@ -2,13 +2,15 @@
 region=$1
 city_name=$2
 city_id=$3
+city_pois=$4
 
 url="http://download.geofabrik.de/russia/$region-fed-district-latest.osm.pbf"
-local_prefix="data/external"
+local_prefix="data"
 local_path=$local_prefix/$region-fed-district-latest.osm.pbf
 city_boundary=$local_prefix/$city_name-boundary.osm
 osm_city_data=$local_prefix/$city_name.osm.pbf
-city_pois=$4
+
+mkdir -p $local_prefix
 # скачиваем файл карт
 wget $url -P $local_prefix -nc
 # извлекаем данные для заданного города 

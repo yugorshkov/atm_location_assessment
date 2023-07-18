@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{include = "atm_location_assessment"}]
 
 [tool.poetry.dependencies]
-python = "~3.9"
+python = "~3.9.17"
 geopandas = "^0.13.2"
 ipykernel = "^6.23.3"
 matplotlib = "^3.7.1"
@@ -21,6 +21,8 @@ minio = "^7.1.15"
 python-dotenv = "^1.0.0"
 black = "^23.3.0"
 h3pandas = "^0.2.4"
+prefect = "^2.10.21"
+streamlit = "^1.24.1"
 
 
 [build-system]
