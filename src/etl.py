@@ -1,7 +1,6 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-import folium
 import geopandas
 import h3pandas
 import json
@@ -9,15 +8,13 @@ import numpy as np
 import os
 import pandas as pd
 import pyrosm
-from dotenv import load_dotenv
-from minio import Minio
-from pathlib import Path
 from prefect import flow, task
+from mc import create_minio_client, upload_to_minio
 
 
 # @task
 def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
-    """Считываем данные из хранилища, выполняем обработку для расчёта 
+    """Считываем данные из хранилища, выполняем обработку для расчёта
     численности жителей многоквартирных домов и вычисляем индекс h3.
     """
     gdf = geopandas.read_file(url)
@@ -51,8 +48,8 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
 
 # @task(retries=3, retry_delay_seconds=5)
 def get_osm_data(region: str, city_name: str, osm_city_id: str) -> str:
-    """Загружаем файл карт OSM. Обрезаем файл по границам города и 
-    фильтруем объекты карт по тэгу.
+    """Скачиваем данные OSM. Из дампа вырезаем нужный город и
+    фильтруем объекты карты по тэгу.
     """
     osm_data_path = f"data/pois-in-{city_name}.osm.pbf"
     os.system(f"src/get_osm_data {region} {city_name} {osm_city_id} {osm_data_path}")
@@ -61,6 +58,9 @@ def get_osm_data(region: str, city_name: str, osm_city_id: str) -> str:
 
 # @task
 def get_pois(fp: str, h3_res: int = 8) -> pd.DataFrame:
+    """Находим точки интереса в обработанных данных OSM.
+    Индексируем точки ячейками h3.
+    """
     osm = pyrosm.OSM(fp)
     with open("data/osm_tags_filter.json") as f:
         custom_filter = json.load(f)
@@ -73,9 +73,13 @@ def get_pois(fp: str, h3_res: int = 8) -> pd.DataFrame:
     return pois
 
 
-def evaluate_locations(
-    gdf: geopandas.GeoDataFrame, group: int, mode: int
-) -> geopandas.GeoDataFrame:
+def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
+    """Объединяем информацию о численности жильцов многоквартирных домов и
+    количестве источников клиентопотока(точек интереса).
+    Рассчитываем оценку мест размещений банкоматов внутри каждой ячейки Н3.
+    """
+    gdfh3 = pd.concat(args, axis=1).fillna(0).h3.h3_to_geo_boundary()
+
     placement_object_type = {1: 100, 2: 90, 3: 0}
     access_mode = {24: 100, 23: 90, 19: 38}
     criterion_weight = {
@@ -84,58 +88,46 @@ def evaluate_locations(
         "population": 0.3,
         "customer_traffic_sources": 0.2,
     }
-    gdf["placement_object_type"] = (
+    gdfh3["placement_object_type"] = (
         placement_object_type[group] * criterion_weight["placement_object_type"]
     )
-    gdf["access_mode"] = access_mode[mode] * criterion_weight["access_mode"]
-    gdf["population"] = (
-        np.where(gdf["population"] * 0.007 > 100, 100, gdf["population"] * 0.007)
+    gdfh3["access_mode"] = access_mode[mode] * criterion_weight["access_mode"]
+    gdfh3["population"] = (
+        np.where(gdfh3["population"] * 0.007 > 100, 100, gdfh3["population"] * 0.007)
         * criterion_weight["population"]
     )
-    gdf["customer_traffic_sources"] = (
-        np.where(gdf["pois"] * 1.25 > 100, 100, gdf["pois"] * 1.25)
+    gdfh3["customer_traffic_sources"] = (
+        np.where(gdfh3["pois"] * 1.25 > 100, 100, gdfh3["pois"] * 1.25)
         * criterion_weight["customer_traffic_sources"]
     )
-    gdf["location_score"] = (
-        gdf["placement_object_type"]
-        + gdf["access_mode"]
-        + gdf["population"]
-        + gdf["customer_traffic_sources"]
+    gdfh3["location_score"] = (
+        gdfh3["placement_object_type"]
+        + gdfh3["access_mode"]
+        + gdfh3["population"]
+        + gdfh3["customer_traffic_sources"]
     )
-    return gdf
-
-
-def make_choropleth_map(gdf: geopandas.GeoDataFrame, col: str) -> folium.Map:
-    m = gdf.explore(
-        column=col, cmap="PuBu", tiles="OpenStreetMap", style_kwds={"fillOpacity": 0.7}
-    )
-    return m
+    return gdfh3
 
 
 # @flow
-def main():
-    load_dotenv()
-    endpoint = os.getenv("MINIO_ENDPOINT")
-    access_key = os.getenv("MINIO_ACCESS_KEY")
-    secret_key = os.getenv("MINIO_SECRET_KEY")
-    bucket_name = os.getenv("MINIO_BUCKET_NAME")
-    client = Minio(endpoint, access_key, secret_key, secure=False)
-    object_name = "myhouse_RU-CITY-016_points_matched.geojson"
-
+def main(h3_res: int, city_info: tuple, bucket: str) -> None:
+    minio_client = create_minio_client()
+    download_object_url = minio_client.presigned_get_object(
+        bucket, "myhouse_RU-CITY-016_points_matched.geojson"
+    )
     apartment_buildings_data = process_apartment_buildings_data(
-        client.presigned_get_object(bucket_name, object_name)
+        download_object_url, h3_res
     )
 
-    region, city_name, osm_city_id = "south", "krasnodar", "r7373058"
-    pois = get_pois(get_osm_data(region, city_name, osm_city_id))
-    gdfh3 = (
-        pd.concat([apartment_buildings_data, pois], axis=1)
-        .fillna(0)
-        .h3.h3_to_geo_boundary()
-    )
+    city_name, osm_city_id, region = city_info
+    pois = get_pois(get_osm_data(region, city_name, osm_city_id), h3_res)
 
-    print(evaluate_locations(gdfh3, 2, 23))
+    gdfh3 = evaluate_locations(apartment_buildings_data, pois, group=2, mode=23)
+    upload_to_minio(minio_client, gdfh3, bucket, "krd-h3-atm-score.geojson")
 
 
 if __name__ == "__main__":
-    main()
+    h3_res = 8
+    city = ("krasnodar", "r7373058", "south")
+    minio_bucket_name = "atm-location-assessment"
+    main(h3_res, city, minio_bucket_name)
