@@ -22,8 +22,8 @@ st.write(gdf.head())
 m = gdf.explore(
     column="location_score",
     cmap="PuBu",
-    tooltip="location_score",
-    popup=True,
+    # tooltip="location_score",
+    # popup=True,
     tiles="OpenStreetMap",
     style_kwds={"fillOpacity": 0.7},
 )

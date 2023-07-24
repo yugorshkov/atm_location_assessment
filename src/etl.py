@@ -9,10 +9,11 @@ import os
 import pandas as pd
 import pyrosm
 from prefect import flow, task
+from prefect.task_runners import ConcurrentTaskRunner
 from mc import create_minio_client, upload_to_minio
 
 
-# @task
+@task
 def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
     """Считываем данные из хранилища, выполняем обработку для расчёта
     численности жителей многоквартирных домов и вычисляем индекс h3.
@@ -46,17 +47,28 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
     return dfh3
 
 
-# @task(retries=3, retry_delay_seconds=5)
-def get_osm_data(region: str, city_name: str, osm_city_id: str) -> str:
-    """Скачиваем данные OSM. Из дампа вырезаем нужный город и
-    фильтруем объекты карты по тэгу.
+@task(retries=3, retry_delay_seconds=[10, 20, 40])
+def get_osm_data(city_info: tuple) -> str:
+    """Скачиваем данные OSM. 
     """
+    region = city_info[-1]
+    local_prefix = "data"
+    local_file = f"{region}-fed-district-latest.osm.pbf"
+    os.system(f"src/get_osm_data.sh {region} {local_prefix} {local_file}")
+    return (f"{local_prefix}/{local_file}", city_info)
+
+
+@task
+def extract_and_filter_geodata(osm_dump_path: str, city_info: tuple) -> str:
+    """Из дампа вырезаем нужный город и фильтруем объекты карты по тэгу.
+    """
+    city_name, osm_city_id, region = city_info
     osm_data_path = f"data/pois-in-{city_name}.osm.pbf"
-    os.system(f"src/get_osm_data {region} {city_name} {osm_city_id} {osm_data_path}")
+    os.system(f"src/process_geo_data.sh {osm_dump_path} {city_name} {osm_city_id} {osm_data_path}")
     return osm_data_path
 
 
-# @task
+@task
 def get_pois(fp: str, h3_res: int = 8) -> pd.DataFrame:
     """Находим точки интереса в обработанных данных OSM.
     Индексируем точки ячейками h3.
@@ -73,6 +85,7 @@ def get_pois(fp: str, h3_res: int = 8) -> pd.DataFrame:
     return pois
 
 
+@task
 def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
     """Объединяем информацию о численности жильцов многоквартирных домов и
     количестве источников клиентопотока(точек интереса).
@@ -109,18 +122,18 @@ def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
     return gdfh3
 
 
-# @flow
+@flow(task_runner=ConcurrentTaskRunner)
 def main(h3_res: int, city_info: tuple, bucket: str) -> None:
     minio_client = create_minio_client()
     download_object_url = minio_client.presigned_get_object(
         bucket, "myhouse_RU-CITY-016_points_matched.geojson"
     )
-    apartment_buildings_data = process_apartment_buildings_data(
+    apartment_buildings_data = process_apartment_buildings_data.submit(
         download_object_url, h3_res
     )
-
-    city_name, osm_city_id, region = city_info
-    pois = get_pois(get_osm_data(region, city_name, osm_city_id), h3_res)
+    osm_data_path = extract_and_filter_geodata(*get_osm_data(city_info))
+    minio_client.fget_object(bucket, "osm_tags_filter.json", "data/osm_tags_filter.json")
+    pois = get_pois(osm_data_path, h3_res)
 
     gdfh3 = evaluate_locations(apartment_buildings_data, pois, group=2, mode=23)
     upload_to_minio(minio_client, gdfh3, bucket, "krd-h3-atm-score.geojson")
