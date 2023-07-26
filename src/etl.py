@@ -49,8 +49,7 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
 
 @task(retries=3, retry_delay_seconds=[10, 20, 40])
 def get_osm_data(city_info: tuple) -> str:
-    """Скачиваем данные OSM. 
-    """
+    """Скачиваем данные OSM."""
     region = city_info[-1]
     local_prefix = "data"
     local_file = f"{region}-fed-district-latest.osm.pbf"
@@ -60,11 +59,12 @@ def get_osm_data(city_info: tuple) -> str:
 
 @task
 def extract_and_filter_geodata(osm_dump_path: str, city_info: tuple) -> str:
-    """Из дампа вырезаем нужный город и фильтруем объекты карты по тэгу.
-    """
+    """Из дампа вырезаем нужный город и фильтруем объекты карты по тэгу."""
     city_name, osm_city_id, region = city_info
     osm_data_path = f"data/pois-in-{city_name}.osm.pbf"
-    os.system(f"src/process_geo_data.sh {osm_dump_path} {city_name} {osm_city_id} {osm_data_path}")
+    os.system(
+        f"src/process_geo_data.sh {osm_dump_path} {city_name} {osm_city_id} {osm_data_path}"
+    )
     return osm_data_path
 
 
@@ -132,7 +132,9 @@ def main(h3_res: int, city_info: tuple, bucket: str) -> None:
         download_object_url, h3_res
     )
     osm_data_path = extract_and_filter_geodata(*get_osm_data(city_info))
-    minio_client.fget_object(bucket, "osm_tags_filter.json", "data/osm_tags_filter.json")
+    minio_client.fget_object(
+        bucket, "osm_tags_filter.json", "data/osm_tags_filter.json"
+    )
     pois = get_pois(osm_data_path, h3_res)
 
     gdfh3 = evaluate_locations(apartment_buildings_data, pois, group=2, mode=23)
