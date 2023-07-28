@@ -8,9 +8,10 @@ import numpy as np
 import os
 import pandas as pd
 import pyrosm
+from dotenv import load_dotenv
+from mc import create_minio_client, upload_to_minio
 from prefect import flow, task
 from prefect.task_runners import ConcurrentTaskRunner
-from mc import create_minio_client, upload_to_minio
 
 
 @task
@@ -123,12 +124,18 @@ def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
 
 
 @flow(task_runner=ConcurrentTaskRunner)
-def main(h3_res: int, city_info: tuple, bucket: str) -> None:
+def main():
+    load_dotenv()
+    bucket = os.getenv("MINIO_BUCKET_NAME")
+    apartment_buildings_data = "myhouse_RU-CITY-016_points_matched.geojson"
+    city_info = ("krasnodar", "r7373058", "south")
+    h3_res = 8
+
     minio_client = create_minio_client()
     download_object_url = minio_client.presigned_get_object(
-        bucket, "myhouse_RU-CITY-016_points_matched.geojson"
+        bucket, apartment_buildings_data
     )
-    apartment_buildings_data = process_apartment_buildings_data.submit(
+    population_size = process_apartment_buildings_data.submit(
         download_object_url, h3_res
     )
     osm_data_path = extract_and_filter_geodata(*get_osm_data(city_info))
@@ -137,12 +144,9 @@ def main(h3_res: int, city_info: tuple, bucket: str) -> None:
     )
     pois = get_pois(osm_data_path, h3_res)
 
-    gdfh3 = evaluate_locations(apartment_buildings_data, pois, group=2, mode=23)
+    gdfh3 = evaluate_locations(population_size, pois, group=2, mode=23)
     upload_to_minio(minio_client, gdfh3, bucket, "krd-h3-atm-score.geojson")
 
 
 if __name__ == "__main__":
-    h3_res = 8
-    city = ("krasnodar", "r7373058", "south")
-    minio_bucket_name = "atm-location-assessment"
-    main(h3_res, city, minio_bucket_name)
+    main()
