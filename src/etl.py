@@ -8,16 +8,21 @@ import numpy as np
 import os
 import pandas as pd
 import pyrosm
+from collections import namedtuple
 from dotenv import load_dotenv
 from mc import create_minio_client, upload_to_minio
 from prefect import flow, task
 from prefect.task_runners import ConcurrentTaskRunner
+from typing import NamedTuple
+
+
+City = namedtuple("City", ["name", "osm_id", "region", "apartment_buildings_data"])
 
 
 @task
 def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
     """Считываем данные из хранилища, выполняем обработку для расчёта
-    численности жителей многоквартирных домов и вычисляем индекс h3.
+    численности жителей многоквартирных домов в ячейке h3.
     """
     gdf = geopandas.read_file(url)
     attrs = ["RMC", "RMC_LIVE", "INHAB", "AREA", "AREA_LIVE", "geometry"]
@@ -25,10 +30,8 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
 
     gdf = gdf.replace({"": np.nan})
     num_col_format = lambda x: str(x).replace(" ", "").replace(",", ".")
-    gdf["RMC"] = gdf["RMC"].apply(num_col_format)
-    gdf["RMC_LIVE"] = gdf["RMC_LIVE"].apply(num_col_format)
-    gdf["AREA"] = gdf["AREA"].apply(num_col_format)
-    gdf["AREA_LIVE"] = gdf["AREA_LIVE"].apply(num_col_format)
+    for col in ["RMC", "RMC_LIVE", "AREA", "AREA_LIVE"]:
+        gdf[col] = gdf[col].apply(num_col_format)
     col_types = {attr: "float" for attr in attrs[:-1]}
     gdf = gdf.astype(col_types)
 
@@ -49,22 +52,20 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
 
 
 @task(retries=3, retry_delay_seconds=[10, 20, 40])
-def get_osm_data(city_info: tuple) -> str:
+def get_osm_data(city: NamedTuple) -> str:
     """Скачиваем данные OSM."""
-    region = city_info[-1]
     local_prefix = "data"
-    local_file = f"{region}-fed-district-latest.osm.pbf"
-    os.system(f"src/get_osm_data.sh {region} {local_prefix} {local_file}")
-    return (f"{local_prefix}/{local_file}", city_info)
+    local_file = f"{city.region}-fed-district-latest.osm.pbf"
+    os.system(f"src/get_osm_data.sh {city.region} {local_prefix} {local_file}")
+    return (f"{local_prefix}/{local_file}", city)
 
 
 @task
-def extract_and_filter_geodata(osm_dump_path: str, city_info: tuple) -> str:
+def extract_and_filter_geodata(osm_dump_path: str, city: NamedTuple) -> str:
     """Из дампа вырезаем нужный город и фильтруем объекты карты по тэгу."""
-    city_name, osm_city_id, region = city_info
-    osm_data_path = f"data/pois-in-{city_name}.osm.pbf"
+    osm_data_path = f"data/pois-in-{city.name}.osm.pbf"
     os.system(
-        f"src/process_geo_data.sh {osm_dump_path} {city_name} {osm_city_id} {osm_data_path}"
+        f"src/process_geo_data.sh {osm_dump_path} {city.name} {city.osm_id} {osm_data_path}"
     )
     return osm_data_path
 
@@ -90,7 +91,7 @@ def get_pois(fp: str, h3_res: int = 8) -> pd.DataFrame:
 def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
     """Объединяем информацию о численности жильцов многоквартирных домов и
     количестве источников клиентопотока(точек интереса).
-    Рассчитываем оценку мест размещений банкоматов внутри каждой ячейки Н3.
+    Оцениваем ячейки Н3 как зоны возможного размещения банкомата.
     """
     gdfh3 = pd.concat(args, axis=1).fillna(0).h3.h3_to_geo_boundary()
 
@@ -124,21 +125,15 @@ def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
 
 
 @flow(task_runner=ConcurrentTaskRunner)
-def main():
-    load_dotenv()
-    bucket = os.getenv("MINIO_BUCKET_NAME")
-    apartment_buildings_data = "myhouse_RU-CITY-016_points_matched.geojson"
-    city_info = ("krasnodar", "r7373058", "south")
-    h3_res = 8
-
+def main(bucket, city, h3_res):
     minio_client = create_minio_client()
     download_object_url = minio_client.presigned_get_object(
-        bucket, apartment_buildings_data
+        bucket, city.apartment_buildings_data
     )
     population_size = process_apartment_buildings_data.submit(
         download_object_url, h3_res
     )
-    osm_data_path = extract_and_filter_geodata(*get_osm_data(city_info))
+    osm_data_path = extract_and_filter_geodata(*get_osm_data(city))
     minio_client.fget_object(
         bucket, "osm_tags_filter.json", "data/osm_tags_filter.json"
     )
@@ -148,5 +143,16 @@ def main():
     upload_to_minio(minio_client, gdfh3, bucket, "krd-h3-atm-score.geojson")
 
 
+@flow
+def etl_flow():
+    bucket = "atm-location-assessment"
+    krd = City(
+        "krasnodar", "r7373058", "south", "myhouse_RU-CITY-016_points_matched.geojson"
+    )
+    h3_res = 8
+
+    main(bucket, krd, h3_res)
+
+
 if __name__ == "__main__":
-    main()
+    etl_flow()

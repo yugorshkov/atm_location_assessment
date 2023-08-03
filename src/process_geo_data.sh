@@ -18,4 +18,3 @@ osmium tags-filter $osm_city_data \
     shop=mall,supermarket,convenience \
     highway=bus_stop railway=tram_stop aeroway=terminal \
     -o $city_pois
-rm $city_boundary $osm_city_data
