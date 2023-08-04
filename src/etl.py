@@ -71,42 +71,58 @@ def extract_and_filter_geodata(osm_dump_path: str, city: NamedTuple) -> str:
 
 
 @task
-def get_pois(fp: str, h3_res: int = 8) -> pd.DataFrame:
-    """Находим точки интереса в обработанных данных OSM.
-    Индексируем точки ячейками h3.
-    """
+def get_pois(fp: str) -> pd.DataFrame:
+    """Находим точки интереса в обработанных данных OSM."""
     osm = pyrosm.OSM(fp)
     with open("data/osm_tags_filter.json") as f:
         custom_filter = json.load(f)
     pois = osm.get_data_by_custom_criteria(custom_filter=custom_filter)
     pois["geometry"] = pois.centroid
-    pois = pois[["id", "geometry"]]
-    pois = pois.h3.geo_to_h3_aggregate(h3_res, "count", return_geometry=False).rename(
-        columns={"id": "pois"}
-    )
     return pois
 
 
 @task
-def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
-    """Объединяем информацию о численности жильцов многоквартирных домов и
-    количестве источников клиентопотока(точек интереса).
+def calculate_placement_score(pois, h3_res):
+    placement_type = pois[["shop", "geometry"]]
+    placement_type = placement_type[placement_type["shop"].notna()]
+    conditions = {
+        100: placement_type["shop"].eq("mall"),
+        90: placement_type["shop"].eq("supermarket"),
+    }
+    placement_type["shop"] = np.select(
+        conditions.values(), conditions.keys(), default=0
+    )
+    placement_type = placement_type.h3.geo_to_h3_aggregate(
+        h3_res, "max", return_geometry=False
+    )
+    placement_type.rename(columns={"shop": "placement_score"}, inplace=True)
+    return placement_type
+
+
+@task
+def count_number_of_pois(pois, h3_res):
+    pois_count = pois[["id", "geometry"]]
+    pois_count = pois_count.h3.geo_to_h3_aggregate(h3_res, "count", return_geometry=False)
+    pois_count.rename(columns={"id": "pois"}, inplace=True)
+    return pois_count
+
+
+@task
+def evaluate_locations(*args) -> geopandas.GeoDataFrame:
+    """Объединяем информацию о численности жильцов многоквартирных домов, 
+    типе объекта возможного размещения и количестве дополнительных источников 
+    клиентопотока(точек интереса).
     Оцениваем ячейки Н3 как зоны возможного размещения банкомата.
     """
     gdfh3 = pd.concat(args, axis=1).fillna(0).h3.h3_to_geo_boundary()
-
-    placement_object_type = {1: 100, 2: 90, 3: 0}
-    access_mode = {24: 100, 23: 90, 19: 38}
     criterion_weight = {
         "placement_object_type": 0.3,
         "access_mode": 0.2,
         "population": 0.3,
         "customer_traffic_sources": 0.2,
     }
-    gdfh3["placement_object_type"] = (
-        placement_object_type[group] * criterion_weight["placement_object_type"]
-    )
-    gdfh3["access_mode"] = access_mode[mode] * criterion_weight["access_mode"]
+    gdfh3["placement_score"] = gdfh3["placement_score"] * criterion_weight["placement_object_type"]
+    gdfh3["access_mode"] = 90 * criterion_weight["access_mode"]
     gdfh3["population"] = (
         np.where(gdfh3["population"] * 0.007 > 100, 100, gdfh3["population"] * 0.007)
         * criterion_weight["population"]
@@ -116,7 +132,7 @@ def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
         * criterion_weight["customer_traffic_sources"]
     )
     gdfh3["location_score"] = (
-        gdfh3["placement_object_type"]
+        gdfh3["placement_score"]
         + gdfh3["access_mode"]
         + gdfh3["population"]
         + gdfh3["customer_traffic_sources"]
@@ -126,6 +142,7 @@ def evaluate_locations(*args, group: int, mode: int) -> geopandas.GeoDataFrame:
 
 @flow(task_runner=ConcurrentTaskRunner)
 def main(bucket, city, h3_res):
+    """Основной поток ETL"""
     minio_client = create_minio_client()
     download_object_url = minio_client.presigned_get_object(
         bucket, city.apartment_buildings_data
@@ -137,9 +154,10 @@ def main(bucket, city, h3_res):
     minio_client.fget_object(
         bucket, "osm_tags_filter.json", "data/osm_tags_filter.json"
     )
-    pois = get_pois(osm_data_path, h3_res)
-
-    gdfh3 = evaluate_locations(population_size, pois, group=2, mode=23)
+    pois = get_pois(osm_data_path)
+    placement_score = calculate_placement_score(pois, h3_res)
+    number_of_pois = count_number_of_pois(pois, h3_res)
+    gdfh3 = evaluate_locations(placement_score, population_size, number_of_pois)
     upload_to_minio(minio_client, gdfh3, bucket, "krd-h3-atm-score.geojson")
 
 
