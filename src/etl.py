@@ -95,7 +95,7 @@ def calculate_placement_score(pois, h3_res):
     placement_type = placement_type.h3.geo_to_h3_aggregate(
         h3_res, "max", return_geometry=False
     )
-    placement_type.rename(columns={"shop": "placement_score"}, inplace=True)
+    placement_type.rename(columns={"shop": "placement"}, inplace=True)
     return placement_type
 
 
@@ -121,21 +121,14 @@ def evaluate_locations(*args) -> geopandas.GeoDataFrame:
         "population": 0.3,
         "customer_traffic_sources": 0.2,
     }
-    gdfh3["placement_score"] = gdfh3["placement_score"] * criterion_weight["placement_object_type"]
-    gdfh3["access_mode"] = 90 * criterion_weight["access_mode"]
+    gdfh3["placement"] = gdfh3["placement"] * criterion_weight["placement_object_type"]
     gdfh3["population"] = (
         np.where(gdfh3["population"] * 0.007 > 100, 100, gdfh3["population"] * 0.007)
         * criterion_weight["population"]
-    )
-    gdfh3["customer_traffic_sources"] = (
+    ).round(2)
+    gdfh3["pois"] = (
         np.where(gdfh3["pois"] * 1.25 > 100, 100, gdfh3["pois"] * 1.25)
         * criterion_weight["customer_traffic_sources"]
-    )
-    gdfh3["location_score"] = (
-        gdfh3["placement_score"]
-        + gdfh3["access_mode"]
-        + gdfh3["population"]
-        + gdfh3["customer_traffic_sources"]
     )
     return gdfh3
 
