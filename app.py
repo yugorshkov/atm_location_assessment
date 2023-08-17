@@ -12,34 +12,50 @@ def main(gdf):
 
     col1, col2 = st.columns(2)
     with col1:
-        city = st.selectbox("Выберите город", ("Краснодар",))
+        city = st.selectbox("Выберите город:", ("Краснодар",))
     with col2:
-        access_mode = st.radio(
-            "Время работы", ("круглосуточно", "до 23:00", "до 19:00"), index=1
+        working_hours = st.radio(
+            "Ожидаемое время работы:",
+            ("круглосуточно", "до 23:00", "до 19:00"),
+            index=1,
         )
-    d = {"круглосуточно": 100, "до 23:00": 90, "до 19:00": 38}
-
-    gdf["access_mode"] = d[access_mode] * 0.2
+    access_mode_score = {"круглосуточно": 100, "до 23:00": 90, "до 19:00": 38}
+    access_mode_weight = 0.2
+    gdf["access_mode"] = access_mode_score[working_hours] * access_mode_weight
     gdf["location_score"] = (
         gdf["placement"] + gdf["access_mode"] + gdf["population"] + gdf["pois"]
-    )
+    ).round(2)
 
     m = gdf.explore(
         column="location_score",
         cmap="PuBu",
-        scheme="naturalbreaks",
+        scheme="Quantiles",
         k=5,
+        legend_kwds={"caption": "Баллы", "scale": False},
         tooltip="location_score",
-        # tooltip_kwds=dict(labels=False),
-        # popup=True,
+        tooltip_kwds={
+            "aliases": ["Оценка территории: "]
+        },
+        popup=["placement", "population", "access_mode", "pois"],
+        popup_kwds={
+            "aliases": [
+                "Объект размещения",
+                "Население",
+                "Время работы",
+                "Источники клиентопотока",
+            ]
+        },
         tiles="OpenStreetMap",
-        tooltip_kwds={},
         style_kwds={"fillOpacity": 0.7},
         name="h3_cells",
     )
-
+    st.info(
+        """Территория города разделена на небольшие шестиугольки (гексы).
+            Чем интенсивнее заливка гекса, тем больше эта территория подходит 
+            для размещения банкомата.""", 
+            icon="ℹ️"
+    )
     st_data = st_folium(m, width=725, zoom=11)
-    st.write(gdf.head())
 
 
 if __name__ == "__main__":

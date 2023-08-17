@@ -125,7 +125,7 @@ def evaluate_locations(*args) -> geopandas.GeoDataFrame:
     gdfh3["population"] = (
         np.where(gdfh3["population"] * 0.007 > 100, 100, gdfh3["population"] * 0.007)
         * criterion_weight["population"]
-    ).round(2)
+    )
     gdfh3["pois"] = (
         np.where(gdfh3["pois"] * 1.25 > 100, 100, gdfh3["pois"] * 1.25)
         * criterion_weight["customer_traffic_sources"]
