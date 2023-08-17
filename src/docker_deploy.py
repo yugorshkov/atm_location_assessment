@@ -1,11 +1,11 @@
 from prefect.deployments import Deployment
 from prefect.infrastructure.container import DockerContainer
-from etl import main
+from etl import etl_flow
 
 docker_block = DockerContainer.load("atms")
 
 docker_dep = Deployment.build_from_flow(
-    flow=main,
+    flow=etl_flow,
     name="atms-docker-flow",
     infrastructure=docker_block,
 )
