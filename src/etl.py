@@ -1,6 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore")
-
 import geopandas
 import h3pandas
 import json
@@ -16,30 +13,36 @@ from prefect.task_runners import ConcurrentTaskRunner
 from typing import NamedTuple
 
 
+AVG_RESIDENTS_IN_APARTMENT = 2.11 # 1.87 - 2.11
+AVG_RESIDENTS_IN_HOUSE = 185 # 185 - 220
+
+
 City = namedtuple("City", ["name", "osm_id", "region", "apartment_buildings_data"])
 
 
 @task
-def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
+def process_apartment_buildings_data(
+    url: str, residents_in_apartment: float, h3_res: int = 8
+) -> pd.DataFrame:
     """Считываем данные из хранилища, выполняем обработку для расчёта
     численности жителей многоквартирных домов в ячейке h3.
     """
     gdf = geopandas.read_file(url)
-    attrs = ["RMC", "RMC_LIVE", "INHAB", "AREA", "AREA_LIVE", "geometry"]
+    attrs = ["RMC", "RMC_LIVE", "INHAB", "geometry"]
     gdf = gdf[attrs]
 
     gdf = gdf.replace({"": np.nan})
     num_col_format = lambda x: str(x).replace(" ", "").replace(",", ".")
-    for col in ["RMC", "RMC_LIVE", "AREA", "AREA_LIVE"]:
+    for col in ["RMC", "RMC_LIVE"]:
         gdf[col] = gdf[col].apply(num_col_format)
     col_types = {attr: "float" for attr in attrs[:-1]}
     gdf = gdf.astype(col_types)
 
-    check_rmc_na = (gdf["RMC"].isna()) | (gdf["RMC"] >= gdf["RMC_LIVE"])
-    gdf["RMC_LIVE"] = np.where(check_rmc_na, gdf["RMC_LIVE"], gdf["RMC"])
+    mask = ((gdf["RMC_LIVE"] > 1000) & (gdf["RMC_LIVE"] > gdf["RMC"])) | gdf[
+        "RMC_LIVE"
+    ].isna()
+    gdf["RMC_LIVE"] = np.where(mask, gdf["RMC"], gdf["RMC_LIVE"])
 
-    temp = gdf[gdf["INHAB"].notna()]
-    residents_in_apartment = (temp["INHAB"] / temp["RMC_LIVE"]).mean().round(2)
     gdf["inhab_calc"] = gdf["RMC_LIVE"] * residents_in_apartment
     residents_in_house = gdf["inhab_calc"].mean()
     gdf["inhab_calc"] = gdf["inhab_calc"].fillna(residents_in_house)
@@ -51,23 +54,39 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
     return dfh3
 
 
+@task
+def estimate_population(fp: str, h3_res: int):
+    osm = pyrosm.OSM(fp)
+    buildings = osm.get_buildings(custom_filter={'building': ['apartments']})
+    buildings["geometry"] = buildings.centroid
+    buildings["population"] = AVG_RESIDENTS_IN_HOUSE
+    buildings = buildings[["population", "geometry"]]
+    buildings = buildings.h3.geo_to_h3_aggregate(h3_res, return_geometry=False)
+    return buildings
+
+
 @task(retries=3, retry_delay_seconds=[10, 20, 40])
 def get_osm_data(city: NamedTuple) -> str:
     """Скачиваем данные OSM."""
     local_prefix = "data"
     local_file = f"{city.region}-fed-district-latest.osm.pbf"
-    os.system(f"src/get_osm_data.sh {city.region} {local_prefix} {local_file}")
-    return (f"{local_prefix}/{local_file}", city)
+    os.system(f"src/osm_get_data.sh {city.region} {local_prefix}")
+    return f"{local_prefix}/{local_file}"
 
 
 @task
-def extract_and_filter_geodata(osm_dump_path: str, city: NamedTuple) -> str:
-    """Из дампа вырезаем нужный город и фильтруем объекты карты по тэгу."""
-    osm_data_path = f"data/pois-in-{city.name}.osm.pbf"
-    os.system(
-        f"src/process_geo_data.sh {osm_dump_path} {city.name} {city.osm_id} {osm_data_path}"
-    )
-    return osm_data_path
+def extract_city(osm_dump_path: str, city: NamedTuple):
+    local_prefix = osm_dump_path.split('/')[0]
+    os.system(f"src/osm_create_geo_extract.sh {local_prefix} {osm_dump_path} {city.name} {city.osm_id}")
+    return f"{local_prefix}/{city.name}/{city.name}.osm.pbf"
+
+
+@task
+def filter_geodata(osm_city_data: str, city: NamedTuple):
+    city_prefix = osm_city_data.rsplit("/", 1)[0]
+    filtered_geo_data = f"{city_prefix}/pois-in-{city.name}.osm.pbf"
+    os.system(f"src/osm_tags_filter.sh {city.name} {city_prefix} {filtered_geo_data}")
+    return filtered_geo_data
 
 
 @task
@@ -102,15 +121,17 @@ def calculate_placement_score(pois, h3_res):
 @task
 def count_number_of_pois(pois, h3_res):
     pois_count = pois[["id", "geometry"]]
-    pois_count = pois_count.h3.geo_to_h3_aggregate(h3_res, "count", return_geometry=False)
+    pois_count = pois_count.h3.geo_to_h3_aggregate(
+        h3_res, "count", return_geometry=False
+    )
     pois_count.rename(columns={"id": "pois"}, inplace=True)
     return pois_count
 
 
 @task
 def evaluate_locations(*args) -> geopandas.GeoDataFrame:
-    """Объединяем информацию о численности жильцов многоквартирных домов, 
-    типе объекта возможного размещения и количестве дополнительных источников 
+    """Объединяем информацию о численности жильцов многоквартирных домов,
+    типе объекта возможного размещения и количестве дополнительных источников
     клиентопотока(точек интереса).
     Оцениваем ячейки Н3 как зоны возможного размещения банкомата.
     """
@@ -135,35 +156,38 @@ def evaluate_locations(*args) -> geopandas.GeoDataFrame:
 
 @flow(task_runner=ConcurrentTaskRunner)
 def main(bucket, city, h3_res):
-    """Основной поток ETL"""
+    """Основной ETL поток"""
+    osm_data_path = get_osm_data(city)
+    city_geo_extract = extract_city.submit(osm_data_path, city)
     minio_client = create_minio_client()
-    download_object_url = minio_client.presigned_get_object(
-        bucket, city.apartment_buildings_data
-    )
-    population_size = process_apartment_buildings_data.submit(
-        download_object_url, h3_res
-    )
-    osm_data_path = extract_and_filter_geodata(*get_osm_data(city))
+    if city.apartment_buildings_data:
+        download_object_url = minio_client.presigned_get_object(bucket, city.apartment_buildings_data)
+        population_size = process_apartment_buildings_data(download_object_url, AVG_RESIDENTS_IN_APARTMENT, h3_res)
+    else:
+        population_size = estimate_population(f"data/{city.name}/{city.name}.osm.pbf", h3_res)
     minio_client.fget_object(
         bucket, "osm_tags_filter.json", "data/osm_tags_filter.json"
     )
-    pois = get_pois(osm_data_path)
+    pois = get_pois(filter_geodata(city_geo_extract, city))
     placement_score = calculate_placement_score(pois, h3_res)
     number_of_pois = count_number_of_pois(pois, h3_res)
     gdfh3 = evaluate_locations(placement_score, population_size, number_of_pois)
-    upload_to_minio(minio_client, gdfh3, bucket, "krd-h3-atm-score.geojson")
+    upload_to_minio(minio_client, gdfh3, bucket, f"{city.name}-h3-atm-score.geojson")
 
 
 @flow
 def etl_flow():
     bucket = "atm-location-assessment"
-    krd = City(
-        "krasnodar", "r7373058", "south", "myhouse_RU-CITY-016_points_matched.geojson"
-    )
+    cities = [
+        City("krasnodar", "r7373058", "south", "myhouse_RU-CITY-016_points_matched.geojson"),
+        City("novorossiysk", "r1477110", "south", ""),
+        City("armavir", "r3476238", "south", ""),
+        City("rostov", "r1285772", "south", ""),
+    ]
     h3_res = 8
-
-    main(bucket, krd, h3_res)
-
+    for city in cities:
+        main(bucket, city, h3_res)
+        
 
 if __name__ == "__main__":
     etl_flow()
