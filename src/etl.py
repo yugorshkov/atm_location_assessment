@@ -13,17 +13,15 @@ from prefect.task_runners import ConcurrentTaskRunner
 from typing import NamedTuple
 
 
-AVG_RESIDENTS_IN_APARTMENT = 2.11 # 1.87 - 2.11
-AVG_RESIDENTS_IN_HOUSE = 185 # 185 - 220
+AVG_RESIDENTS_IN_APARTMENT = 2.11  # 1.87 - 2.11
+AVG_RESIDENTS_IN_HOUSE = 185  # 185 - 220
 
 
 City = namedtuple("City", ["name", "osm_id", "region", "apartment_buildings_data"])
 
 
 @task
-def process_apartment_buildings_data(
-    url: str, residents_in_apartment: float, h3_res: int = 8
-) -> pd.DataFrame:
+def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
     """Считываем данные из хранилища, выполняем обработку для расчёта
     численности жителей многоквартирных домов в ячейке h3.
     """
@@ -43,7 +41,7 @@ def process_apartment_buildings_data(
     ].isna()
     gdf["RMC_LIVE"] = np.where(mask, gdf["RMC"], gdf["RMC_LIVE"])
 
-    gdf["inhab_calc"] = gdf["RMC_LIVE"] * residents_in_apartment
+    gdf["inhab_calc"] = gdf["RMC_LIVE"] * AVG_RESIDENTS_IN_APARTMENT
     residents_in_house = gdf["inhab_calc"].mean()
     gdf["inhab_calc"] = gdf["inhab_calc"].fillna(residents_in_house)
     gdf["inhab_calc"] = gdf[["INHAB", "inhab_calc"]].max(axis=1)
@@ -57,7 +55,7 @@ def process_apartment_buildings_data(
 @task
 def estimate_population(fp: str, h3_res: int):
     osm = pyrosm.OSM(fp)
-    buildings = osm.get_buildings(custom_filter={'building': ['apartments']})
+    buildings = osm.get_buildings(custom_filter={"building": ["apartments"]})
     buildings["geometry"] = buildings.centroid
     buildings["population"] = AVG_RESIDENTS_IN_HOUSE
     buildings = buildings[["population", "geometry"]]
@@ -66,9 +64,8 @@ def estimate_population(fp: str, h3_res: int):
 
 
 @task(retries=3, retry_delay_seconds=[10, 20, 40])
-def get_osm_data(city: NamedTuple) -> str:
+def get_osm_data(city: NamedTuple, local_prefix: str = "data") -> str:
     """Скачиваем данные OSM."""
-    local_prefix = "data"
     local_file = f"{city.region}-fed-district-latest.osm.pbf"
     os.system(f"src/osm_get_data.sh {city.region} {local_prefix}")
     return f"{local_prefix}/{local_file}"
@@ -76,8 +73,10 @@ def get_osm_data(city: NamedTuple) -> str:
 
 @task
 def extract_city(osm_dump_path: str, city: NamedTuple):
-    local_prefix = osm_dump_path.split('/')[0]
-    os.system(f"src/osm_create_geo_extract.sh {local_prefix} {osm_dump_path} {city.name} {city.osm_id}")
+    local_prefix = osm_dump_path.split("/")[0]
+    os.system(
+        f"src/osm_create_geo_extract.sh {local_prefix} {osm_dump_path} {city.name} {city.osm_id}"
+    )
     return f"{local_prefix}/{city.name}/{city.name}.osm.pbf"
 
 
@@ -161,10 +160,12 @@ def main(bucket, city, h3_res):
     city_geo_extract = extract_city.submit(osm_data_path, city)
     minio_client = create_minio_client()
     if city.apartment_buildings_data:
-        download_object_url = minio_client.presigned_get_object(bucket, city.apartment_buildings_data)
-        population_size = process_apartment_buildings_data(download_object_url, AVG_RESIDENTS_IN_APARTMENT, h3_res)
+        download_object_url = minio_client.presigned_get_object(
+            bucket, city.apartment_buildings_data
+        )
+        population_size = process_apartment_buildings_data(download_object_url, h3_res)
     else:
-        population_size = estimate_population(f"data/{city.name}/{city.name}.osm.pbf", h3_res)
+        population_size = estimate_population(city_geo_extract, h3_res)
     minio_client.fget_object(
         bucket, "osm_tags_filter.json", "data/osm_tags_filter.json"
     )
@@ -179,7 +180,12 @@ def main(bucket, city, h3_res):
 def etl_flow():
     bucket = "atm-location-assessment"
     cities = [
-        City("krasnodar", "r7373058", "south", "myhouse_RU-CITY-016_points_matched.geojson"),
+        City(
+            "krasnodar",
+            "r7373058",
+            "south",
+            "myhouse_RU-CITY-016_points_matched.geojson",
+        ),
         City("novorossiysk", "r1477110", "south", ""),
         City("armavir", "r3476238", "south", ""),
         City("rostov", "r1285772", "south", ""),
@@ -187,7 +193,7 @@ def etl_flow():
     h3_res = 8
     for city in cities:
         main(bucket, city, h3_res)
-        
+
 
 if __name__ == "__main__":
     etl_flow()
