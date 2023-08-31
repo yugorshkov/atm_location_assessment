@@ -1,13 +1,14 @@
 from prefect.deployments import Deployment
 from prefect.infrastructure.container import DockerContainer
-from etl import etl_flow
 
 docker_block = DockerContainer.load("atms")
 
-docker_dep = Deployment.build_from_flow(
-    flow=etl_flow,
-    name="atms-docker-flow",
-    infrastructure=docker_block,
+docker_dep = Deployment(
+    name="atms-flow-docker",
+    flow_name='etl_flow',
+    entrypoint="src/etl.py:etl_flow",
+    path="/opt/prefect/flows",
+    infrastructure=docker_block
 )
 
 if __name__ == "__main__":
