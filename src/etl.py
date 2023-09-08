@@ -21,7 +21,7 @@ City = namedtuple("City", ["name", "osm_id", "region", "apartment_buildings_data
 
 
 @task
-def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
+def process_apartment_buildings_data(url: str, h3_res: int) -> pd.DataFrame:
     """Считываем данные из хранилища, выполняем обработку для расчёта
     численности жителей многоквартирных домов в ячейке h3.
     """
@@ -53,7 +53,8 @@ def process_apartment_buildings_data(url: str, h3_res: int = 8) -> pd.DataFrame:
 
 
 @task
-def estimate_population(fp: str, h3_res: int):
+def estimate_population(fp: str, h3_res: int) -> pd.DataFrame:
+    """Выполняем статистическую оценку численности населения на основе OSM"""
     osm = pyrosm.OSM(fp)
     buildings = osm.get_buildings(custom_filter={"building": ["apartments"]})
     buildings["geometry"] = buildings.centroid
@@ -72,7 +73,8 @@ def get_osm_data(city: NamedTuple, local_prefix: str = "data") -> str:
 
 
 @task
-def extract_city(osm_dump_path: str, city: NamedTuple):
+def extract_city(osm_dump_path: str, city: NamedTuple) -> str:
+    """Извлекаем данные по указанному городу в отдельный файл"""
     local_prefix = osm_dump_path.split("/")[0]
     os.system(
         f"src/osm_create_geo_extract.sh {local_prefix} {osm_dump_path} {city.name} {city.osm_id}"
@@ -81,7 +83,8 @@ def extract_city(osm_dump_path: str, city: NamedTuple):
 
 
 @task
-def filter_geodata(osm_city_data: str, city: NamedTuple):
+def filter_geodata(osm_city_data: str, city: NamedTuple) -> str:
+    """Отбираем интересующие объекты карты"""
     city_prefix = osm_city_data.rsplit("/", 1)[0]
     filtered_geo_data = f"{city_prefix}/pois-in-{city.name}.osm.pbf"
     os.system(f"src/osm_tags_filter.sh {city.name} {city_prefix} {filtered_geo_data}")
@@ -100,7 +103,10 @@ def get_pois(fp: str) -> pd.DataFrame:
 
 
 @task
-def calculate_placement_score(pois, h3_res):
+def calculate_placement_score(
+    pois: geopandas.GeoDataFrame, h3_res: int
+) -> pd.DataFrame:
+    """Рассчитываем балл локации по наличию оптимальных мест размещения"""
     placement_type = pois[["shop", "geometry"]]
     placement_type = placement_type[placement_type["shop"].notna()]
     conditions = {
@@ -118,7 +124,8 @@ def calculate_placement_score(pois, h3_res):
 
 
 @task
-def count_number_of_pois(pois, h3_res):
+def count_number_of_pois(pois: geopandas.GeoDataFrame, h3_res: int) -> pd.DataFrame:
+    """Рассчитываем количество точек интереса"""
     pois_count = pois[["id", "geometry"]]
     pois_count = pois_count.h3.geo_to_h3_aggregate(
         h3_res, "count", return_geometry=False
@@ -154,7 +161,7 @@ def evaluate_locations(*args) -> geopandas.GeoDataFrame:
 
 
 @flow(task_runner=ConcurrentTaskRunner)
-def main(bucket, city, h3_res):
+def main(bucket: str, city: NamedTuple, h3_res: int) -> None:
     """Основной ETL поток"""
     osm_data_path = get_osm_data(city)
     city_geo_extract = extract_city.submit(osm_data_path, city)

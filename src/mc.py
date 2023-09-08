@@ -5,6 +5,7 @@ from minio import Minio
 
 
 def create_minio_client():
+    """Создаем клиент для взаимодействия с объектным хранилищем"""
     load_dotenv()
     endpoint = os.getenv("MINIO_ENDPOINT")
     access_key = os.getenv("MINIO_ACCESS_KEY")
@@ -13,7 +14,8 @@ def create_minio_client():
     return client
 
 
-def upload_to_minio(client, obj, bucket_name, object_name) -> None:
+def upload_to_minio(client, obj, bucket_name, object_name):
+    """Загружаем python-объект в хранилище без сохранения на локальном диске"""
     stream_data = io.BytesIO()
     obj.to_file(stream_data, driver="GeoJSON")
     stream_data.seek(0)
