@@ -58,7 +58,7 @@ def atms_app():
         style_kwds={"fillOpacity": 0.7},
         name="h3_cells",
     )
-    st_folium(m, width=725, zoom=11)
+    st_folium(m, width=725, zoom=11, returned_objects=[])
 
 
 if __name__ == "__main__":
